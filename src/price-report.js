@@ -70,7 +70,11 @@ export function findOffersInRanges(offersByItem, ranges = {}) {
     );
 }
 
-export function createPriceEmbeds(priceGroups, publishedAt = new Date()) {
+export function createPriceEmbeds(
+  priceGroups,
+  publishedAt = new Date(),
+  sourceUrl,
+) {
   const fields = priceGroups.map(({ item, offers }) => {
     return {
       name: item,
@@ -90,14 +94,16 @@ export function createPriceEmbeds(priceGroups, publishedAt = new Date()) {
   const embeds = [];
   for (let index = 0; index < fields.length; index += 25) {
     const page = Math.floor(index / 25) + 1;
+    const description =
+      page === 1
+        ? "Все предложения в настроенных диапазонах цен."
+        : "Остальные товары из опубликованного списка.";
     embeds.push(
       new EmbedBuilder()
         .setColor(0x3498db)
         .setTitle(page === 1 ? "🔔 Предложения скупщиков" : "Предложения · продолжение")
         .setDescription(
-          page === 1
-            ? "Все предложения в настроенных диапазонах цен."
-            : "Остальные товары из опубликованного списка.",
+          `${description}${sourceUrl ? `\n[Ссылка на цены](${sourceUrl})` : ""}`,
         )
         .addFields(fields.slice(index, index + 25))
         .setFooter({ text: PRICE_REPORT_FOOTER })

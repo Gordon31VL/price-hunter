@@ -137,6 +137,17 @@ export function formatRangeList(ranges) {
     : "Диапазоны пока не установлены. Используйте `/range set`.";
 }
 
+export function formatPersonalRangeList(ranges) {
+  const sortedRanges = Object.values(ranges).sort((left, right) =>
+    left.item.localeCompare(right.item, "ru-RU"),
+  );
+  return sortedRanges.length > 0
+    ? `**Ваши личные диапазоны цен:**\n${sortedRanges
+        .map((range) => `• **${range.item}** — $${range.minimum}–$${range.maximum}`)
+        .join("\n")}`
+    : "Личные диапазоны пока не настроены. Нажмите «Изменить диапазоны», чтобы добавить товар.";
+}
+
 export async function handleChannelCommand(interaction, store) {
   if (!interaction.guildId) {
     await interaction.reply({

@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -7,8 +8,12 @@ import {
   Events,
   GatewayIntentBits,
   MessageFlags,
+  ModalBuilder,
   Partials,
   PermissionFlagsBits,
+  StringSelectMenuBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } from "discord.js";
 import {
   handleChannelCommand,
@@ -16,8 +21,10 @@ import {
   handleRangeAutocomplete,
   handleRangeCommand,
   formatRangeList,
+  formatPersonalRangeList,
+  getRangeItemSuggestions,
 } from "./commands.js";
-import { parsePriceMessage } from "./price-message.js";
+import { normalizeItemName, parsePriceMessage } from "./price-message.js";
 import {
   createPriceEmbeds,
   findOffersInRanges,
@@ -34,6 +41,15 @@ if (!token) {
 
 const SHOW_RANGES_BUTTON_ID = "show-price-ranges";
 const SHOW_MAX_PRICES_BUTTON_ID = "show-max-prices";
+const PERSONAL_RANGE_BUTTON_ID = "configure-personal-range";
+const PERSONAL_RANGE_SELECT_PREFIX = "personal-range-item";
+const PERSONAL_RANGE_MODAL_PREFIX = "personal-range-modal";
+const DM_PERSONAL_MANAGE_PREFIX = "dm-personal-manage";
+const DM_PERSONAL_SELECT_PREFIX = "dm-personal-range-item";
+const DM_PERSONAL_NOTIFICATIONS_PREFIX = "dm-personal-notifications";
+const DM_PERSONAL_VIEW_RANGES_PREFIX = "dm-personal-view-ranges";
+const DM_MAX_PRICES_PREFIX = "dm-max-prices";
+const pendingPersonalRanges = new Map();
 const store = new RangesStore();
 const client = new Client({
   intents: [
@@ -62,6 +78,174 @@ client.once(Events.ClientReady, (readyClient) => {
   }
 });
 
+function isPriceReportMessage(interaction) {
+  const message = interaction.message;
+  return Boolean(
+    interaction.guildId &&
+      interaction.channelId === store.getChannelId(interaction.guildId) &&
+      message.author?.id === client.user?.id &&
+      message.embeds.some(
+        (embed) => embed.footer?.text === PRICE_REPORT_FOOTER,
+      ),
+  );
+}
+
+function getPersonalRangeOptions(guildId, userId) {
+  const personalRanges = store.getPersonalRanges(guildId, userId);
+  const items = new Map();
+  const candidates = [
+    ...Object.values(personalRanges).map((range) => range.item),
+    ...getRangeItemSuggestions(store, guildId).map((suggestion) => suggestion.value),
+  ];
+
+  for (const item of candidates) {
+    const key = normalizeItemName(item);
+    if (item.length <= 100 && !items.has(key)) {
+      items.set(key, item);
+    }
+  }
+
+  return [...items.values()].slice(0, 25).map((item) => {
+    const currentRange = personalRanges[normalizeItemName(item)];
+    return {
+      label: item,
+      value: item,
+      ...(currentRange
+        ? {
+            description: `Сейчас: $${currentRange.minimum}–$${currentRange.maximum}`,
+          }
+        : {}),
+    };
+  });
+}
+
+function addPersonalNotificationStatus(content, enabled) {
+  return `${content}\n\nЛичные уведомления: ${enabled ? "включены" : "выключены"}.`;
+}
+
+function getGuildDisplayName(guildId) {
+  return client.guilds.cache.get(guildId)?.name ?? "этого сервера";
+}
+
+function createPersonalDmComponents(guildId, userId) {
+  const notificationsEnabled = store.arePersonalNotificationsEnabled(
+    guildId,
+    userId,
+  );
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${DM_PERSONAL_VIEW_RANGES_PREFIX}:${guildId}:${userId}`)
+        .setLabel("Мои личные цены")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`${DM_MAX_PRICES_PREFIX}:${guildId}:${userId}`)
+        .setLabel("Максимальные цены и +20%")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`${DM_PERSONAL_MANAGE_PREFIX}:${guildId}:${userId}`)
+        .setLabel("Изменить диапазоны")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`${DM_PERSONAL_NOTIFICATIONS_PREFIX}:${guildId}:${userId}`)
+        .setLabel(
+          notificationsEnabled
+            ? "Выключить уведомления"
+            : "Включить уведомления",
+        )
+        .setStyle(
+          notificationsEnabled ? ButtonStyle.Danger : ButtonStyle.Success,
+        ),
+    ),
+  ];
+}
+
+function getInteractionPrivacyOptions(interaction) {
+  return interaction.guildId ? { flags: MessageFlags.Ephemeral } : {};
+}
+
+async function sendPersonalSettingsPanel(guildId, userId) {
+  try {
+    const user = await client.users.fetch(userId);
+    const enabled = store.arePersonalNotificationsEnabled(guildId, userId);
+    await user.send({
+      content: addPersonalNotificationStatus(
+        `Управление личными диапазонами цен для сервера **${getGuildDisplayName(guildId)}**.`,
+        enabled,
+      ),
+      components: createPersonalDmComponents(guildId, userId),
+    });
+  } catch (error) {
+    console.error(
+      `Could not send personal settings to user ${userId} in guild ${guildId}:`,
+      error,
+    );
+  }
+}
+
+async function replyToPersonalRangeUpdate(interaction, pending, content) {
+  if (pending.isDm) {
+    const enabled = store.arePersonalNotificationsEnabled(
+      pending.guildId,
+      pending.userId,
+    );
+    await interaction.reply({
+      content: addPersonalNotificationStatus(content, enabled),
+      components: createPersonalDmComponents(
+        pending.guildId,
+        pending.userId,
+      ),
+    });
+    return;
+  }
+
+  await interaction.reply({
+    content,
+    flags: MessageFlags.Ephemeral,
+  });
+  await sendPersonalSettingsPanel(pending.guildId, pending.userId);
+}
+
+async function sendPersonalPriceReports(
+  guildId,
+  offersByItem,
+  publishedAt,
+  sourceUrl,
+) {
+  for (const userId of store.getPersonalRangeUserIds(guildId)) {
+    if (!store.arePersonalNotificationsEnabled(guildId, userId)) {
+      continue;
+    }
+
+    const priceGroups = findOffersInRanges(
+      offersByItem,
+      store.getPersonalRanges(guildId, userId),
+    );
+    if (priceGroups.length === 0) {
+      continue;
+    }
+
+    try {
+      const user = await client.users.fetch(userId);
+      const enabled = store.arePersonalNotificationsEnabled(guildId, userId);
+      await user.send({
+        content: addPersonalNotificationStatus(
+          `🔔 Новые предложения на сервере **${getGuildDisplayName(guildId)}** ` +
+            "попали в ваши личные диапазоны цен:",
+          enabled,
+        ),
+        embeds: createPriceEmbeds(priceGroups, publishedAt, sourceUrl),
+        components: createPersonalDmComponents(guildId, userId),
+      });
+    } catch (error) {
+      console.error(
+        `Could not send a personal price report to user ${userId} in guild ${guildId}:`,
+        error,
+      );
+    }
+  }
+}
+
 client.on(Events.MessageCreate, async (message) => {
   if (
     message.author.id === client.user?.id ||
@@ -83,11 +267,6 @@ client.on(Events.MessageCreate, async (message) => {
     .join("\n");
   const offersByItem = parsePriceMessage(messageText);
   if (offersByItem.size === 0) {
-    if (/Скупщик|:\s*\$\d/u.test(messageText)) {
-      console.warn(
-        `Could not parse price-like message ${message.id}. Check its format and the Message Content Intent setting.`,
-      );
-    }
     return;
   }
 
@@ -106,9 +285,15 @@ client.on(Events.MessageCreate, async (message) => {
 
   try {
     store.rememberItems(message.guildId, offersByItem);
+    await sendPersonalPriceReports(
+      message.guildId,
+      offersByItem,
+      message.createdAt,
+      message.url,
+    );
     const ranges = store.getRanges(message.guildId);
     const priceGroups = findOffersInRanges(offersByItem, ranges);
-    const embeds = createPriceEmbeds(priceGroups, message.createdAt);
+    const embeds = createPriceEmbeds(priceGroups, message.createdAt, message.url);
     const components = [
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -119,6 +304,10 @@ client.on(Events.MessageCreate, async (message) => {
           .setCustomId(SHOW_MAX_PRICES_BUTTON_ID)
           .setLabel("Максимальные цены +20%")
           .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(PERSONAL_RANGE_BUTTON_ID)
+          .setLabel("Личный диапазон цен")
+          .setStyle(ButtonStyle.Primary),
       ),
     ];
     const notifyRoleId = store.getNotifyRoleId(message.guildId);
@@ -228,21 +417,135 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (
       interaction.isButton() &&
-      [SHOW_RANGES_BUTTON_ID, SHOW_MAX_PRICES_BUTTON_ID].includes(
+      interaction.customId.startsWith(`${DM_PERSONAL_MANAGE_PREFIX}:`)
+    ) {
+      const [, guildId, ownerId] = interaction.customId.split(":");
+      if (
+        interaction.guildId ||
+        ownerId !== interaction.user.id ||
+        !/^\d+$/u.test(guildId)
+      ) {
+        await interaction.reply({
+          content: "Эта настройка доступна только её владельцу в личных сообщениях.",
+          ...getInteractionPrivacyOptions(interaction),
+        });
+        return;
+      }
+
+      const itemSelect = new StringSelectMenuBuilder()
+        .setCustomId(
+          `${DM_PERSONAL_SELECT_PREFIX}:${guildId}:${interaction.user.id}`,
+        )
+        .setPlaceholder("Выберите товар")
+        .addOptions(getPersonalRangeOptions(guildId, interaction.user.id));
+      await interaction.reply({
+        content:
+          `Выберите товар для сервера **${getGuildDisplayName(guildId)}** и укажите новые границы. ` +
+          "Оставьте обе цены пустыми, чтобы удалить диапазон.",
+        components: [new ActionRowBuilder().addComponents(itemSelect)],
+      });
+      return;
+    }
+
+    if (
+      interaction.isButton() &&
+      (interaction.customId.startsWith(`${DM_PERSONAL_VIEW_RANGES_PREFIX}:`) ||
+        interaction.customId.startsWith(`${DM_MAX_PRICES_PREFIX}:`))
+    ) {
+      const [prefix, guildId, ownerId] = interaction.customId.split(":");
+      if (
+        interaction.guildId ||
+        ownerId !== interaction.user.id ||
+        !/^\d+$/u.test(guildId)
+      ) {
+        await interaction.reply({
+          content: "Эта настройка доступна только её владельцу в личных сообщениях.",
+          ...getInteractionPrivacyOptions(interaction),
+        });
+        return;
+      }
+
+      await interaction.reply({
+        content:
+          prefix === DM_PERSONAL_VIEW_RANGES_PREFIX
+            ? formatPersonalRangeList(
+                store.getPersonalRanges(guildId, interaction.user.id),
+              )
+            : formatMaximumPriceList(),
+      });
+      return;
+    }
+
+    if (
+      interaction.isButton() &&
+      interaction.customId.startsWith(`${DM_PERSONAL_NOTIFICATIONS_PREFIX}:`)
+    ) {
+      const [, guildId, ownerId] = interaction.customId.split(":");
+      if (
+        interaction.guildId ||
+        ownerId !== interaction.user.id ||
+        !/^\d+$/u.test(guildId)
+      ) {
+        await interaction.reply({
+          content: "Эта настройка доступна только её владельцу в личных сообщениях.",
+          ...getInteractionPrivacyOptions(interaction),
+        });
+        return;
+      }
+
+      const enabled = !store.arePersonalNotificationsEnabled(
+        guildId,
+        interaction.user.id,
+      );
+      store.setPersonalNotificationsEnabled(
+        guildId,
+        interaction.user.id,
+        enabled,
+      );
+      const content = interaction.message.content.replace(
+        /\n\nЛичные уведомления: (?:включены|выключены)\.$/u,
+        "",
+      );
+      await interaction.update({
+        content: addPersonalNotificationStatus(content, enabled),
+        components: createPersonalDmComponents(guildId, interaction.user.id),
+      });
+      return;
+    }
+
+    if (
+      interaction.isButton() &&
+      [
+        SHOW_RANGES_BUTTON_ID,
+        SHOW_MAX_PRICES_BUTTON_ID,
+        PERSONAL_RANGE_BUTTON_ID,
+      ].includes(
         interaction.customId,
       )
     ) {
-      const message = interaction.message;
-      if (
-        !interaction.guildId ||
-        interaction.channelId !== store.getChannelId(interaction.guildId) ||
-        message.author.id !== client.user?.id ||
-        !message.embeds.some(
-          (embed) => embed.footer?.text === PRICE_REPORT_FOOTER,
-        )
-      ) {
+      if (!isPriceReportMessage(interaction)) {
         await interaction.reply({
           content: "Эта кнопка доступна только в сообщении со сводкой цен.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      if (interaction.customId === PERSONAL_RANGE_BUTTON_ID) {
+        const options = getPersonalRangeOptions(
+          interaction.guildId,
+          interaction.user.id,
+        );
+        const itemSelect = new StringSelectMenuBuilder()
+          .setCustomId(`${PERSONAL_RANGE_SELECT_PREFIX}:${interaction.user.id}`)
+          .setPlaceholder("Выберите товар")
+          .addOptions(options);
+        await interaction.reply({
+          content:
+            "Выберите товар, затем задайте личные границы. " +
+            "Чтобы удалить диапазон, оставьте обе цены пустыми. " +
+            "Учитывайте только цены без бонуса 3-х часов.",
+          components: [new ActionRowBuilder().addComponents(itemSelect)],
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -255,6 +558,167 @@ client.on(Events.InteractionCreate, async (interaction) => {
             : formatMaximumPriceList(),
         flags: MessageFlags.Ephemeral,
       });
+      return;
+    }
+
+    const isGuildPersonalRangeSelect =
+      interaction.isStringSelectMenu() &&
+      interaction.customId.startsWith(`${PERSONAL_RANGE_SELECT_PREFIX}:`);
+    const isDmPersonalRangeSelect =
+      interaction.isStringSelectMenu() &&
+      interaction.customId.startsWith(`${DM_PERSONAL_SELECT_PREFIX}:`);
+    if (isGuildPersonalRangeSelect || isDmPersonalRangeSelect) {
+      const isDm = isDmPersonalRangeSelect;
+      const [, dmGuildId, dmOwnerId] = interaction.customId.split(":");
+      const guildId = isDm ? dmGuildId : interaction.guildId;
+      const ownerId = isDm ? dmOwnerId : interaction.customId.split(":")[1];
+      const isInvalidContext =
+        ownerId !== interaction.user.id ||
+        (isDm
+          ? Boolean(interaction.guildId) || !/^\d+$/u.test(guildId)
+          : !interaction.guildId ||
+            interaction.channelId !== store.getChannelId(interaction.guildId));
+      if (isInvalidContext) {
+        await interaction.reply({
+          content: "Эта настройка доступна только открывшему её пользователю.",
+          ...getInteractionPrivacyOptions(interaction),
+        });
+        return;
+      }
+
+      const item = interaction.values[0];
+      if (
+        !getPersonalRangeOptions(guildId, interaction.user.id).some(
+          (option) => option.value === item,
+        )
+      ) {
+        await interaction.reply({
+          content: "Выберите товар из списка.",
+          ...getInteractionPrivacyOptions(interaction),
+        });
+        return;
+      }
+
+      const nonce = randomUUID().replace(/-/gu, "");
+      const expiredBefore = Date.now() - 15 * 60 * 1000;
+      for (const [pendingNonce, pending] of pendingPersonalRanges) {
+        if (pending.createdAt < expiredBefore) {
+          pendingPersonalRanges.delete(pendingNonce);
+        }
+      }
+      pendingPersonalRanges.set(nonce, {
+        guildId,
+        userId: interaction.user.id,
+        item,
+        createdAt: Date.now(),
+        isDm,
+      });
+      const currentRange =
+        store.getPersonalRanges(guildId, interaction.user.id)[normalizeItemName(item)];
+      const minimumInput = new TextInputBuilder()
+        .setCustomId("minimum")
+        .setLabel("Минимальная цена")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setPlaceholder("Например, 50");
+      const maximumInput = new TextInputBuilder()
+        .setCustomId("maximum")
+        .setLabel("Максимальная цена")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setPlaceholder("Например, 100");
+      if (currentRange) {
+        minimumInput.setValue(String(currentRange.minimum));
+        maximumInput.setValue(String(currentRange.maximum));
+      }
+      const modal = new ModalBuilder()
+        .setCustomId(`${PERSONAL_RANGE_MODAL_PREFIX}:${nonce}`)
+        .setTitle(`Диапазон: ${item}`)
+        .addComponents(
+          new ActionRowBuilder().addComponents(minimumInput),
+          new ActionRowBuilder().addComponents(maximumInput),
+        );
+      await interaction.showModal(modal);
+      return;
+    }
+
+    if (
+      interaction.isModalSubmit() &&
+      interaction.customId.startsWith(`${PERSONAL_RANGE_MODAL_PREFIX}:`)
+    ) {
+      const nonce = interaction.customId.split(":")[1];
+      const pending = pendingPersonalRanges.get(nonce);
+      pendingPersonalRanges.delete(nonce);
+      if (
+        !pending ||
+        pending.userId !== interaction.user.id ||
+        (pending.isDm
+          ? Boolean(interaction.guildId)
+          : pending.guildId !== interaction.guildId) ||
+        pending.createdAt < Date.now() - 15 * 60 * 1000
+      ) {
+        await interaction.reply({
+          content: "Срок действия формы истёк. Откройте настройку ещё раз.",
+          ...getInteractionPrivacyOptions(interaction),
+        });
+        return;
+      }
+
+      const minimumText = interaction.fields
+        .getTextInputValue("minimum")
+        .trim();
+      const maximumText = interaction.fields
+        .getTextInputValue("maximum")
+        .trim();
+      if (!minimumText && !maximumText) {
+        const removed = store.clearPersonalRange(
+          pending.guildId,
+          pending.userId,
+          pending.item,
+        );
+        await replyToPersonalRangeUpdate(
+          interaction,
+          pending,
+          removed
+            ? `Личный диапазон для **${pending.item}** удалён.`
+            : `Личный диапазон для **${pending.item}** не был установлен.`,
+        );
+        return;
+      }
+
+      const minimum = Number(minimumText);
+      const maximum = Number(maximumText);
+      if (
+        !minimumText ||
+        !maximumText ||
+        !/^\d+$/u.test(minimumText) ||
+        !/^\d+$/u.test(maximumText) ||
+        !Number.isSafeInteger(minimum) ||
+        !Number.isSafeInteger(maximum) ||
+        minimum < 0 ||
+        maximum < minimum
+      ) {
+        await interaction.reply({
+          content:
+            "Укажите целые неотрицательные цены; минимум не должен превышать максимум.",
+          ...getInteractionPrivacyOptions(interaction),
+        });
+        return;
+      }
+
+      store.setPersonalRange(
+        pending.guildId,
+        pending.userId,
+        pending.item,
+        minimum,
+        maximum,
+      );
+      await replyToPersonalRangeUpdate(
+        interaction,
+        pending,
+        `Личный диапазон для **${pending.item}** установлен: ` +
+          `**$${minimum}–$${maximum}**.`,
+      );
       return;
     }
 
@@ -288,7 +752,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     console.error("Could not handle Discord interaction:", error);
     const response = {
       content: "Не удалось выполнить команду. Проверьте логи бота.",
-      flags: MessageFlags.Ephemeral,
+      ...getInteractionPrivacyOptions(interaction),
     };
     if (interaction.deferred || interaction.replied) {
       await interaction.followUp(response);
