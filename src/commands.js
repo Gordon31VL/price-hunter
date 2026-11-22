@@ -1,5 +1,6 @@
 import {
   ChannelType,
+  MessageFlags,
   PermissionFlagsBits,
   SlashCommandBuilder,
 } from "discord.js";
@@ -125,11 +126,22 @@ export function getRangeItemSuggestions(store, guildId, query = "") {
     .map((item) => ({ name: item, value: item }));
 }
 
+export function formatRangeList(ranges) {
+  const sortedRanges = Object.values(ranges).sort((left, right) =>
+    left.item.localeCompare(right.item, "ru-RU"),
+  );
+  return sortedRanges.length > 0
+    ? `**Установленные диапазоны цен:**\n${sortedRanges
+        .map((range) => `• **${range.item}** — $${range.minimum}–$${range.maximum}`)
+        .join("\n")}`
+    : "Диапазоны пока не установлены. Используйте `/range set`.";
+}
+
 export async function handleChannelCommand(interaction, store) {
   if (!interaction.guildId) {
     await interaction.reply({
       content: "Выбрать канал можно только на сервере.",
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -137,7 +149,7 @@ export async function handleChannelCommand(interaction, store) {
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
     await interaction.reply({
       content: "Для настройки канала необходимо право «Управление сервером».",
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -147,7 +159,7 @@ export async function handleChannelCommand(interaction, store) {
     store.setChannelId(interaction.guildId, channel.id);
     await interaction.reply({
       content: `Бот будет обрабатывать списки цен в канале <#${channel.id}>.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -157,7 +169,7 @@ export async function handleChannelCommand(interaction, store) {
     content: channelId
       ? `Сейчас выбран канал <#${channelId}>.`
       : "Канал ещё не выбран. Используйте `/channel set`.",
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
   });
 }
 
@@ -165,7 +177,7 @@ export async function handleNotifyRoleCommand(interaction, store) {
   if (!interaction.guildId) {
     await interaction.reply({
       content: "Настроить роль уведомлений можно только на сервере.",
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -173,7 +185,7 @@ export async function handleNotifyRoleCommand(interaction, store) {
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
     await interaction.reply({
       content: "Для настройки роли необходимо право «Управление сервером».",
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -193,7 +205,7 @@ export async function handleNotifyRoleCommand(interaction, store) {
       await interaction.reply({
         content:
           "Бот не может выдавать эту роль. Выберите обычную роль ниже высшей роли бота и убедитесь, что у бота есть право «Управление ролями».",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -202,7 +214,7 @@ export async function handleNotifyRoleCommand(interaction, store) {
     await interaction.reply({
       content: `При публикации цен бот будет упоминать роль ${role} и выдавать её по реакции 🔔. Убедитесь, что роль разрешено упоминать.`,
       allowedMentions: { parse: [] },
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -211,7 +223,7 @@ export async function handleNotifyRoleCommand(interaction, store) {
     store.setNotifyRoleId(guildId, null);
     await interaction.reply({
       content: "Упоминание роли при публикации цен отключено.",
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -222,7 +234,7 @@ export async function handleNotifyRoleCommand(interaction, store) {
       ? `Сейчас для уведомлений выбрана роль <@&${roleId}>.`
       : "Роль уведомлений не выбрана. Используйте `/notify-role set`.",
     allowedMentions: { parse: [] },
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
   });
 }
 
@@ -230,7 +242,7 @@ export async function handleRangeCommand(interaction, store) {
   if (!interaction.guildId) {
     await interaction.reply({
       content: "Команды диапазонов доступны только на сервере.",
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -245,7 +257,7 @@ export async function handleRangeCommand(interaction, store) {
     if (!item || minimum > maximum) {
       await interaction.reply({
         content: "Укажите товар и корректные границы: минимум не должен превышать максимум.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -253,7 +265,7 @@ export async function handleRangeCommand(interaction, store) {
     store.setRange(guildId, item, minimum, maximum);
     await interaction.reply({
       content: `Диапазон для **${item}** установлен: **$${minimum}–$${maximum}**.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -265,21 +277,13 @@ export async function handleRangeCommand(interaction, store) {
       content: removed
         ? `Диапазон для **${item}** удалён.`
         : `Для **${item}** диапазон не был установлен.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  const ranges = Object.values(store.getRanges(guildId)).sort((left, right) =>
-    left.item.localeCompare(right.item, "ru-RU"),
-  );
   await interaction.reply({
-    content:
-      ranges.length > 0
-        ? `**Установленные диапазоны цен:**\n${ranges
-            .map((range) => `• **${range.item}** — $${range.minimum}–$${range.maximum}`)
-            .join("\n")}`
-        : "Диапазоны пока не установлены. Используйте `/range set`.",
-    ephemeral: true,
+    content: formatRangeList(store.getRanges(guildId)),
+    flags: MessageFlags.Ephemeral,
   });
 }

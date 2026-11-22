@@ -4,10 +4,42 @@ export const ROLE_SUBSCRIPTION_EMOJI = "🔔";
 export const PRICE_REPORT_FOOTER =
   "Учитывается цена до скобок · Диапазоны задаются командой /range";
 
+const SCREENSHOT_MAX_PRICES = [
+  { item: "Медь", maximum: 60 },
+  { item: "Изумруд", maximum: 370 },
+  { item: "Рубин", maximum: 700 },
+  { item: "Алмаз", maximum: 4000 },
+  { item: "Бензин", maximum: 200 },
+  { item: "Солярка", maximum: 200 },
+  { item: "Керосин", maximum: 200 },
+  { item: "Окунь", maximum: 50 },
+  { item: "Карп", maximum: 370 },
+  { item: "Форель", maximum: 565 },
+  { item: "Лосось", maximum: 4000 },
+  { item: "Идеальное мясо", maximum: 1000 },
+  { item: "Хорошее мясо", maximum: 1500 },
+  { item: "Фальшивые деньги", maximum: 10000 },
+  { item: "Жемчуг", maximum: 1600 },
+  { item: "Шкура", maximum: 2000 },
+  { item: "Капуста", maximum: 750, markup: false },
+  { item: "Тыква", maximum: 850, markup: false },
+  { item: "Мандарины", maximum: 950, markup: false },
+  { item: "Ананасы", maximum: 1150, markup: false },
+];
+
 function formatPrice(price) {
   return `$${new Intl.NumberFormat("ru-RU", {
     maximumFractionDigits: 2,
   }).format(price)}`;
+}
+
+export function formatMaximumPriceList() {
+  return `**Максимальные цены:**\n${SCREENSHOT_MAX_PRICES.map(
+    ({ item, maximum, markup = true }) =>
+      `• **${item}** — ${formatPrice(maximum)}${
+        markup ? ` → ${formatPrice(Math.round(maximum * 1.2))} (+20%)` : ""
+      }`,
+  ).join("\n")}`;
 }
 
 export function findOffersInRanges(offersByItem, ranges = {}) {
