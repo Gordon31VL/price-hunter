@@ -1,5 +1,7 @@
 import {
+  ApplicationIntegrationType,
   ChannelType,
+  InteractionContextType,
   MessageFlags,
   PermissionFlagsBits,
   SlashCommandBuilder,
@@ -92,6 +94,24 @@ export const rangeCommand = new SlashCommandBuilder()
           .setRequired(true)
           .setAutocomplete(true),
       ),
+  );
+
+export const whoCommand = new SlashCommandBuilder()
+  .setName("who")
+  .setDescription("Определить пользователя или сервер по ID")
+  .setIntegrationTypes(
+    ApplicationIntegrationType.GuildInstall,
+    ApplicationIntegrationType.UserInstall,
+  )
+  .setContexts(
+    InteractionContextType.Guild,
+    InteractionContextType.BotDM,
+  )
+  .addStringOption((option) =>
+    option
+      .setName("id")
+      .setDescription("Discord ID пользователя или сервера")
+      .setRequired(true),
   );
 
 export async function handleRangeAutocomplete(interaction, store) {

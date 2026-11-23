@@ -23,22 +23,31 @@ import {
   formatRangeList,
   formatPersonalRangeList,
   getRangeItemSuggestions,
+  whoCommand,
 } from "./commands.js";
 import { normalizeItemName, parsePriceMessage } from "./price-message.js";
 import {
   createPriceEmbeds,
   findOffersInRanges,
   formatMaximumPriceList,
+  getScreenshotMaximumPrice,
   PRICE_REPORT_FOOTER,
   ROLE_SUBSCRIPTION_EMOJI,
 } from "./price-report.js";
 import { RangesStore } from "./ranges-store.js";
+import { UpdateNoticeStore } from "./update-notice-store.js";
+import {
+  loadUpdateNotice,
+  removeUpdateNotice,
+  UPDATE_NOTICE_ID,
+} from "./update-notice.js";
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
   throw new Error("Set DISCORD_TOKEN in your .env file.");
 }
 
+const botOwnerId = process.env.BOT_OWNER_ID;
 const SHOW_RANGES_BUTTON_ID = "show-price-ranges";
 const SHOW_MAX_PRICES_BUTTON_ID = "show-max-prices";
 const PERSONAL_RANGE_BUTTON_ID = "configure-personal-range";
@@ -51,10 +60,12 @@ const DM_PERSONAL_VIEW_RANGES_PREFIX = "dm-personal-view-ranges";
 const DM_MAX_PRICES_PREFIX = "dm-max-prices";
 const pendingPersonalRanges = new Map();
 const store = new RangesStore();
+const updateNoticeStore = new UpdateNoticeStore();
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.DirectMessages,
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.MessageContent,
   ],
@@ -66,14 +77,58 @@ const client = new Client({
   ],
 });
 
-client.once(Events.ClientReady, (readyClient) => {
+client.once(Events.ClientReady, async (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
+  const updateNotice = loadUpdateNotice();
+  let hasConfiguredPriceChannel = false;
+  let allConfiguredChannelsNotified = true;
   for (const guild of readyClient.guilds.cache.values()) {
     const channelId = store.getChannelId(guild.id);
     if (channelId) {
+      hasConfiguredPriceChannel = true;
       console.log(`Price channel for ${guild.name}: ${channelId}`);
+      if (updateNoticeStore.hasSent(guild.id, UPDATE_NOTICE_ID)) {
+        continue;
+      }
+
+      if (!updateNotice) {
+        allConfiguredChannelsNotified = false;
+        continue;
+      }
+
+      try {
+        const channel = await guild.channels.fetch(channelId);
+        if (!channel?.isTextBased() || typeof channel.send !== "function") {
+          allConfiguredChannelsNotified = false;
+          console.error(
+            `Cannot post the update notice for ${guild.name}: configured price channel ${channelId} is not a text channel.`,
+          );
+          continue;
+        }
+
+        await channel.send({
+          embeds: [updateNotice],
+          allowedMentions: { parse: [] },
+        });
+        updateNoticeStore.markSent(guild.id, UPDATE_NOTICE_ID);
+      } catch (error) {
+        allConfiguredChannelsNotified = false;
+        console.error(
+          `Could not post the one-time update notice for ${guild.name}:`,
+          error,
+        );
+      }
     } else {
       console.warn(`No price channel configured for ${guild.name}. Use /channel set.`);
+    }
+  }
+
+  if (updateNotice && hasConfiguredPriceChannel && allConfiguredChannelsNotified) {
+    try {
+      removeUpdateNotice();
+      console.log("The one-time update notice content file was removed.");
+    } catch (error) {
+      console.error("Could not remove the one-time update notice content file:", error);
     }
   }
 });
@@ -415,6 +470,63 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
+    if (interaction.isChatInputCommand() && interaction.commandName === "who") {
+      const privacyOptions = getInteractionPrivacyOptions(interaction);
+      if (!botOwnerId || interaction.user.id !== botOwnerId) {
+        await interaction.reply({
+          content: "Эта команда доступна только владельцу бота.",
+          ...privacyOptions,
+        });
+        return;
+      }
+
+      const targetId = interaction.options.getString("id", true).trim();
+      if (!/^\d{17,20}$/u.test(targetId)) {
+        await interaction.reply({
+          content: "Укажите корректный Discord ID (17–20 цифр).",
+          ...privacyOptions,
+        });
+        return;
+      }
+
+      let targetUser;
+      try {
+        targetUser = await client.users.fetch(targetId);
+      } catch (error) {
+        if (error.code !== 10013) {
+          throw error;
+        }
+      }
+
+      if (targetUser) {
+        await interaction.reply({
+          content: `<@${targetId}>`,
+          allowedMentions: { parse: [], users: [targetId] },
+          ...privacyOptions,
+        });
+        return;
+      }
+
+      try {
+        const guild = await client.guilds.fetch(targetId);
+        await interaction.reply({
+          content:
+            `Сервер: **${guild.name}**\nhttps://discord.com/channels/${guild.id}`,
+          ...privacyOptions,
+        });
+      } catch (error) {
+        if (error.code !== 10004 && error.code !== 50001) {
+          throw error;
+        }
+        await interaction.reply({
+          content:
+            "Пользователь не найден. Чтобы определить сервер, бот должен состоять на нём.",
+          ...privacyOptions,
+        });
+      }
+      return;
+    }
+
     if (
       interaction.isButton() &&
       interaction.customId.startsWith(`${DM_PERSONAL_MANAGE_PREFIX}:`)
@@ -441,7 +553,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.reply({
         content:
           `Выберите товар для сервера **${getGuildDisplayName(guildId)}** и укажите новые границы. ` +
-          "Оставьте обе цены пустыми, чтобы удалить диапазон.",
+          "Максимум для товара подставляется автоматически; оставьте обе цены пустыми, чтобы удалить диапазон.",
         components: [new ActionRowBuilder().addComponents(itemSelect)],
       });
       return;
@@ -543,7 +655,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.reply({
           content:
             "Выберите товар, затем задайте личные границы. " +
-            "Чтобы удалить диапазон, оставьте обе цены пустыми. " +
+            "Максимум подставится автоматически; чтобы удалить диапазон, оставьте обе цены пустыми. " +
             "Учитывайте только цены без бонуса 3-х часов.",
           components: [new ActionRowBuilder().addComponents(itemSelect)],
           flags: MessageFlags.Ephemeral,
@@ -615,21 +727,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
       const currentRange =
         store.getPersonalRanges(guildId, interaction.user.id)[normalizeItemName(item)];
+      const automaticMaximum = getScreenshotMaximumPrice(item);
       const minimumInput = new TextInputBuilder()
         .setCustomId("minimum")
         .setLabel("Минимальная цена")
         .setStyle(TextInputStyle.Short)
         .setRequired(false)
+        .setValue(String(currentRange?.minimum ?? 0))
         .setPlaceholder("Например, 50");
       const maximumInput = new TextInputBuilder()
         .setCustomId("maximum")
-        .setLabel("Максимальная цена")
+        .setLabel(
+          automaticMaximum === undefined
+            ? "Максимальная цена"
+            : "Максимальная цена (авто)",
+        )
         .setStyle(TextInputStyle.Short)
         .setRequired(false)
         .setPlaceholder("Например, 100");
-      if (currentRange) {
-        minimumInput.setValue(String(currentRange.minimum));
-        maximumInput.setValue(String(currentRange.maximum));
+      const maximum = automaticMaximum ?? currentRange?.maximum;
+      if (maximum !== undefined) {
+        maximumInput.setValue(String(maximum));
       }
       const modal = new ModalBuilder()
         .setCustomId(`${PERSONAL_RANGE_MODAL_PREFIX}:${nonce}`)

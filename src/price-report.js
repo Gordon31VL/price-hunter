@@ -1,10 +1,11 @@
 import { EmbedBuilder } from "discord.js";
+import { normalizeItemName } from "./price-message.js";
 
 export const ROLE_SUBSCRIPTION_EMOJI = "🔔";
 export const PRICE_REPORT_FOOTER =
   "Учитывается цена до скобок · Диапазоны задаются командой /range";
 
-const SCREENSHOT_MAX_PRICES = [
+export const SCREENSHOT_MAX_PRICES = Object.freeze([
   { item: "Медь", maximum: 60 },
   { item: "Изумруд", maximum: 370 },
   { item: "Рубин", maximum: 700 },
@@ -25,7 +26,14 @@ const SCREENSHOT_MAX_PRICES = [
   { item: "Тыква", maximum: 850, markup: false },
   { item: "Мандарины", maximum: 950, markup: false },
   { item: "Ананасы", maximum: 1150, markup: false },
-];
+]);
+
+export function getScreenshotMaximumPrice(item) {
+  const normalizedItem = normalizeItemName(item);
+  return SCREENSHOT_MAX_PRICES.find(
+    (price) => normalizeItemName(price.item) === normalizedItem,
+  )?.maximum;
+}
 
 function formatPrice(price) {
   return `$${new Intl.NumberFormat("ru-RU", {

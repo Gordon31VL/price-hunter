@@ -4,6 +4,7 @@ import {
   channelCommand,
   notifyRoleCommand,
   rangeCommand,
+  whoCommand,
 } from "./commands.js";
 
 const { DISCORD_TOKEN, DISCORD_CLIENT_ID } = process.env;
@@ -17,6 +18,7 @@ await rest.put(Routes.applicationCommands(DISCORD_CLIENT_ID), {
     channelCommand.toJSON(),
     notifyRoleCommand.toJSON(),
     rangeCommand.toJSON(),
+    whoCommand.toJSON(),
   ],
 });
 console.log("Discord slash commands registered.");
