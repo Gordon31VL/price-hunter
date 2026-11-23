@@ -60,6 +60,18 @@ const DM_PERSONAL_VIEW_RANGES_PREFIX = "dm-personal-view-ranges";
 const DM_MAX_PRICES_PREFIX = "dm-max-prices";
 const pendingPersonalRanges = new Map();
 const store = new RangesStore();
+const updatedPersonalMaximums = store.updatePersonalRangeMaximums(
+  "personal-range-maximums-2026-11-23",
+  ["Шкура", "Идеальное мясо", "Хорошее мясо"].map((item) => ({
+    item,
+    maximum: getScreenshotMaximumPrice(item),
+  })),
+);
+if (updatedPersonalMaximums > 0) {
+  console.log(
+    `Updated saved personal maximums for ${updatedPersonalMaximums} product ranges.`,
+  );
+}
 const updateNoticeStore = new UpdateNoticeStore();
 const client = new Client({
   intents: [

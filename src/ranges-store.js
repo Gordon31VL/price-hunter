@@ -68,6 +68,43 @@ export class RangesStore {
     this.#savePersonal();
   }
 
+  updatePersonalRangeMaximums(migrationId, maximumPrices) {
+    if (!migrationId) {
+      throw new Error("A migration ID is required to update personal ranges.");
+    }
+
+    this.personalData.migrations ??= [];
+    if (this.personalData.migrations.includes(migrationId)) {
+      return 0;
+    }
+
+    const maximumsByItem = new Map(
+      maximumPrices.map(({ item, maximum }) => [
+        normalizeItemName(item),
+        maximum,
+      ]),
+    );
+    let updatedCount = 0;
+
+    for (const guildRanges of Object.values(this.personalData.guilds)) {
+      for (const userRanges of Object.values(guildRanges)) {
+        for (const [key, range] of Object.entries(userRanges)) {
+          const maximum = maximumsByItem.get(
+            normalizeItemName(range.item ?? key),
+          );
+          if (maximum !== undefined && range.maximum !== maximum) {
+            range.maximum = maximum;
+            updatedCount += 1;
+          }
+        }
+      }
+    }
+
+    this.personalData.migrations.push(migrationId);
+    this.#savePersonal();
+    return updatedCount;
+  }
+
   clearPersonalRange(guildId, userId, item) {
     if (!userId) {
       throw new Error("A user ID is required to clear a personal price range.");
